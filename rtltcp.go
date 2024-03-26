@@ -3,45 +3,33 @@ package rtltcp
 
 import (
 	"encoding/binary"
-	"flag"
 	"fmt"
-	"log"
-	"time"
 	"net"
+	"reflect"
+	"time"
 
 	"github.com/bemasher/rtltcp/si"
 )
 
 var dongleMagic = [...]byte{'R', 'T', 'L', '0'}
 
+const defaultAddress = "127.0.0.1:1234"
+
 // Contains dongle information and an embedded tcp connection to the spectrum server
 type SDR struct {
 	net.Conn
-	Flags Flags
-	Info  DongleInfo
+	Config Config
+	Info   DongleInfo
 }
 
 // Give an address of the form "127.0.0.1:1234" connects to the spectrum
 // server at the given address or returns an error. The user is responsible
 // for closing this connection. If addr is nil, use "127.0.0.1:1234" or
 // command line flag value.
-func (sdr *SDR) Connect(addr *net.TCPAddr) (err error) {
-	// using local var here so that something can be passed in an used other
-	//  than what is set in sdr.Flags.ServerAddr in case that is required
-	var conn_addr string
-	if addr == nil {
-		if sdr.Flags.ServerAddr == "" {
-			sdr.Flags.ServerAddr = "127.0.0.1:1234"
-		}
-		conn_addr = sdr.Flags.ServerAddr
-	} else {
-		conn_addr = fmt.Sprintf("%s:%d", addr.IP, addr.Port)
-	}
-
-	sdr.Conn, err = net.DialTimeout("tcp", conn_addr, sdr.Flags.ConnectTimeout)
+func (sdr *SDR) Connect(address string, timeout time.Duration) (err error) {
+	sdr.Conn, err = net.DialTimeout("tcp", address, timeout)
 	if err != nil {
-		err = fmt.Errorf("Error connecting to spectrum server: %s", err)
-		return
+		return fmt.Errorf("Error connecting to spectrum server: %w", err)
 	}
 
 	// If we exit this function due to an error, close the connection.
@@ -53,7 +41,7 @@ func (sdr *SDR) Connect(addr *net.TCPAddr) (err error) {
 
 	err = binary.Read(sdr.Conn, binary.BigEndian, &sdr.Info)
 	if err != nil {
-		err = fmt.Errorf("Error getting dongle information: %s", err)
+		err = fmt.Errorf("Error getting dongle information: %w", err)
 		return
 	}
 
@@ -64,89 +52,65 @@ func (sdr *SDR) Connect(addr *net.TCPAddr) (err error) {
 	return
 }
 
-type Flags struct {
-	ServerAddr     string
-	CenterFreq     si.ScientificNotation
-	SampleRate     si.ScientificNotation
-	TunerGainMode  bool
-	TunerGain      float64
-	FreqCorrection int
-	TestMode       bool
-	AgcMode        bool
-	DirectSampling bool
-	OffsetTuning   bool
-	RtlXtalFreq    uint
-	TunerXtalFreq  uint
-	GainByIndex    uint
-	ConnectTimeout time.Duration
+type Config struct {
+	CenterFreq     si.ScientificNotation // center frequency to receive on
+	SampleRate     si.ScientificNotation // sample rate
+	TunerGainMode  bool                  // enable/disable tuner gain
+	TunerGain      float64               // set tuner gain in dB
+	FreqCorrection int                   // frequency correction in PPM
+	TestMode       bool                  // enable/disable test mode
+	AgcMode        bool                  // enable/disable rtl agc
+	DirectSampling bool                  // enable/disable direct sampling
+	OffsetTuning   bool                  // enable/disable offset tuning
+	RtlXtalFreq    uint                  // set rtl xtal frequency
+	TunerXtalFreq  uint                  // set tuner xtal frequency
+	GainByIndex    uint                  // set gain by index
 }
 
-// Registers command line flags for rtltcp commands.
-func (sdr *SDR) RegisterFlags() {
-	flag.StringVar(&sdr.Flags.ServerAddr, "server", "127.0.0.1:1234", "address or hostname of rtl_tcp instance")
-	flag.Var(&sdr.Flags.CenterFreq, "centerfreq", "center frequency to receive on")
-	flag.Lookup("centerfreq").DefValue = "100M"
-	flag.Var(&sdr.Flags.SampleRate, "samplerate", "sample rate")
-	flag.Lookup("samplerate").DefValue = "2.4M"
-	flag.BoolVar(&sdr.Flags.TunerGainMode, "tunergainmode", false, "enable/disable tuner gain")
-	flag.Float64Var(&sdr.Flags.TunerGain, "tunergain", 0.0, "set tuner gain in dB")
-	flag.IntVar(&sdr.Flags.FreqCorrection, "freqcorrection", 0, "frequency correction in ppm")
-	flag.BoolVar(&sdr.Flags.TestMode, "testmode", false, "enable/disable test mode")
-	flag.BoolVar(&sdr.Flags.AgcMode, "agcmode", false, "enable/disable rtl agc")
-	flag.BoolVar(&sdr.Flags.DirectSampling, "directsampling", false, "enable/disable direct sampling")
-	flag.BoolVar(&sdr.Flags.OffsetTuning, "offsettuning", false, "enable/disable offset tuning")
-	flag.UintVar(&sdr.Flags.RtlXtalFreq, "rtlxtalfreq", 0, "set rtl xtal frequency")
-	flag.UintVar(&sdr.Flags.TunerXtalFreq, "tunerxtalfreq", 0, "set tuner xtal frequency")
-	flag.UintVar(&sdr.Flags.GainByIndex, "gainbyindex", 0, "set gain by index")
-	flag.DurationVar(&sdr.Flags.ConnectTimeout, "connecttimeout", 0, "set a Duration as a connection timeout 0 for infinite")
-}
-
-// Parses flags and executes commands associated with each flag. Should only
-// be called once connected to rtl_tcp.
-func (sdr SDR) HandleFlags() (err error) {
-	// Catch any errors panicked while visiting flags.
-	defer func() {
-		if r := recover(); r != nil {
-			err = r.(error)
-		}
-	}()
-
-	flag.CommandLine.Visit(func(f *flag.Flag) {
-		var err error
-		switch f.Name {
-		case "centerfreq":
-			err = sdr.SetCenterFreq(uint32(sdr.Flags.CenterFreq))
-		case "samplerate":
-			err = sdr.SetSampleRate(uint32(sdr.Flags.SampleRate))
-		case "tunergainmode":
-			err = sdr.SetGainMode(sdr.Flags.TunerGainMode)
-		case "tunergain":
-			err = sdr.SetGain(uint32(sdr.Flags.TunerGain * 10.0))
-		case "freqcorrection":
-			err = sdr.SetFreqCorrection(uint32(sdr.Flags.FreqCorrection))
-		case "testmode":
-			err = sdr.SetTestMode(sdr.Flags.TestMode)
-		case "agcmode":
-			err = sdr.SetAGCMode(sdr.Flags.AgcMode)
-		case "directsampling":
-			err = sdr.SetDirectSampling(sdr.Flags.DirectSampling)
-		case "offsettuning":
-			err = sdr.SetOffsetTuning(sdr.Flags.OffsetTuning)
-		case "rtlxtalfreq":
-			err = sdr.SetRTLXtalFreq(uint32(sdr.Flags.RtlXtalFreq))
-		case "tunerxtalfreq":
-			err = sdr.SetTunerXtalFreq(uint32(sdr.Flags.TunerXtalFreq))
-		case "gainbyindex":
-			err = sdr.SetGainByIndex(uint32(sdr.Flags.GainByIndex))
-		}
-
-		// If we encounter an error, panic to catch in parent scope.
-		if err != nil {
-			panic(err)
-		}
-	})
-
+// DefaultConfig returns a Config object with defaults to be used with SDR
+func DefaultConfig() (config Config) {
+	config.CenterFreq.Set("100M")
+	config.SampleRate.Set("2.4M")
 	return
+}
+
+func (sdr SDR) Configure() (err error) {
+	fields := reflect.VisibleFields(reflect.TypeOf(sdr.Config))
+	for _, field := range fields {
+		switch field.Name {
+		case "CenterFreq":
+			err = sdr.SetCenterFreq(uint32(sdr.Config.CenterFreq))
+		case "SampleRate":
+			err = sdr.SetSampleRate(uint32(sdr.Config.SampleRate))
+		case "TunerGainMode":
+			err = sdr.SetGainMode(sdr.Config.TunerGainMode)
+		case "TunerGain":
+			err = sdr.SetGain(uint32(sdr.Config.TunerGain * 10.0))
+		case "FreqCorrection":
+			err = sdr.SetFreqCorrection(uint32(sdr.Config.FreqCorrection))
+		case "TestMode":
+			err = sdr.SetTestMode(sdr.Config.TestMode)
+		case "AgcMode":
+			err = sdr.SetAGCMode(sdr.Config.AgcMode)
+		case "DirectSampling":
+			err = sdr.SetDirectSampling(sdr.Config.DirectSampling)
+		case "OffsetTuning":
+			err = sdr.SetOffsetTuning(sdr.Config.OffsetTuning)
+		case "RtlXtalFreq":
+			err = sdr.SetRTLXtalFreq(uint32(sdr.Config.RtlXtalFreq))
+		case "TunerXtalFreq":
+			err = sdr.SetTunerXtalFreq(uint32(sdr.Config.TunerXtalFreq))
+		case "GainByIndex":
+			err = sdr.SetGainByIndex(uint32(sdr.Config.GainByIndex))
+		default:
+			err = fmt.Errorf("unknown configuration field: %v", field.Name)
+		}
+
+		if err != nil {
+			return fmt.Errorf("err configuring sdr: %w", err)
+		}
+	}
+	return nil
 }
 
 // Contains the Magic number, tuner information and the number of valid gain values.
@@ -293,8 +257,4 @@ func (sdr SDR) SetRTLXtalFreq(freq uint32) (err error) {
 // Set tuner xtal frequency.
 func (sdr SDR) SetTunerXtalFreq(freq uint32) (err error) {
 	return sdr.execute(command{tunerXtalFreq, freq})
-}
-
-func init() {
-	log.SetFlags(log.Lshortfile)
 }
