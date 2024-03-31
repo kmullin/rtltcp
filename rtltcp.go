@@ -13,7 +13,7 @@ import (
 
 var dongleMagic = [...]byte{'R', 'T', 'L', '0'}
 
-const defaultAddress = "127.0.0.1:1234"
+const DefaultAddress = "127.0.0.1:1234"
 
 // Contains dongle information and an embedded tcp connection to the spectrum server
 type SDR struct {
@@ -22,11 +22,13 @@ type SDR struct {
 	Info   DongleInfo
 }
 
-// Give an address of the form "127.0.0.1:1234" connects to the spectrum
+// Give an address of the form "<hostname or IP>:<port>", connects to the spectrum
 // server at the given address or returns an error. The user is responsible
-// for closing this connection. If addr is nil, use "127.0.0.1:1234" or
-// command line flag value.
+// for closing this connection. If address is an empty string, use "127.0.0.1:1234"
 func (sdr *SDR) Connect(address string, timeout time.Duration) (err error) {
+	if address == "" {
+		address = DefaultAddress
+	}
 	sdr.Conn, err = net.DialTimeout("tcp", address, timeout)
 	if err != nil {
 		return fmt.Errorf("Error connecting to spectrum server: %w", err)
